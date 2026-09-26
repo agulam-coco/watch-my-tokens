@@ -37,6 +37,8 @@ static lv_obj_t *s_approve_btn = NULL;
 static bool s_alert_active = false;
 static uint32_t s_press_start_ms = 0;
 static bool s_press_active = false;
+static lv_obj_t *s_success_overlay = NULL;
+static lv_obj_t *s_deny_overlay = NULL;
 
 // ── Serial protocol dispatcher ────────────────────────────────────────────────
 // Parses one complete line per the AgentPager serial spec and updates the UI.
@@ -108,7 +110,6 @@ static void handle_line(const char *line)
         }
 
         lvgl_port_unlock();
-        lv_refr_now(NULL);
     }
     else if (strncmp(line, "SUMMARY:", 8) == 0)
     {
@@ -133,17 +134,17 @@ static void handle_line(const char *line)
             lv_obj_add_flag(s_approve_btn, LV_OBJ_FLAG_HIDDEN);
         lvgl_port_unlock();
     }
-else if (strncmp(line, "SCREEN:LOG:", 11) == 0)
-{
-    int approved = 0, denied = 0;
-    sscanf(line + 11, "%d:%d", &approved, &denied);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%d approved\n%d denied", approved, denied);
-    lvgl_port_lock(0);
-    if (s_agents_label)
-        lv_label_set_text(s_agents_label, buf);
-    lvgl_port_unlock();
-}
+    else if (strncmp(line, "SCREEN:LOG:", 11) == 0)
+    {
+        int approved = 0, denied = 0;
+        sscanf(line + 11, "%d:%d", &approved, &denied);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%d approved\n%d denied", approved, denied);
+        lvgl_port_lock(0);
+        if (s_agents_label)
+            lv_label_set_text(s_agents_label, buf);
+        lvgl_port_unlock();
+    }
 }
 
 // Reads raw bytes directly off the USB-Serial-JTAG peripheral (this board's
@@ -179,6 +180,156 @@ static void serial_read_task(void *arg)
     }
 }
 
+// Resets the base screen (arc/labels/button) back to home state. Same logic
+// as the SCREEN:HOME handler in handle_line(), factored out so the device can
+// self-reset immediately on approve without waiting on the bridge.
+static void reset_to_home_screen(void)
+{
+    s_alert_active = false;
+    if (s_arc)
+    {
+        lv_arc_set_value(s_arc, 0); // will be overwritten by next STATS:, fine as a placeholder
+        lv_obj_set_style_arc_color(s_arc, lv_color_hex(0xFF9500), LV_PART_INDICATOR);
+        lv_obj_set_style_shadow_width(s_arc, 0, 0);
+    }
+    if (s_agents_label)
+        lv_label_set_text(s_agents_label, "0 AGENTS");
+    if (s_pct_label)
+        lv_label_set_text(s_pct_label, "TOKENS 0%");
+    if (s_cost_label)
+    {
+        lv_label_set_text(s_cost_label, "$0.00 today");
+        lv_obj_clear_flag(s_cost_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_approve_btn)
+        lv_obj_add_flag(s_approve_btn, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void deny_overlay_opa_cb(void *var, int32_t value)
+{
+    lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
+}
+
+static void deny_overlay_done_cb(lv_anim_t *a)
+{
+    lv_obj_t *obj = (lv_obj_t *)a->var;
+    if (obj)
+        lv_obj_delete(obj);
+    s_deny_overlay = NULL;
+}
+
+static void show_deny_animation(void)
+{
+    if (s_success_overlay)
+    {
+        lv_anim_delete(s_success_overlay, NULL);
+        lv_obj_delete(s_success_overlay);
+        s_success_overlay = NULL;
+    }
+    if (s_deny_overlay)
+    {
+        lv_anim_delete(s_deny_overlay, NULL);
+        lv_obj_delete(s_deny_overlay);
+        s_deny_overlay = NULL;
+    }
+
+    reset_to_home_screen();
+
+    // Full-screen RED overlay
+    s_deny_overlay = lv_obj_create(lv_scr_act());
+    lv_obj_remove_style_all(s_deny_overlay);
+    lv_obj_set_size(s_deny_overlay, 240, 240);
+    lv_obj_center(s_deny_overlay);
+    lv_obj_set_style_bg_color(s_deny_overlay, lv_color_hex(0xE60000), 0);
+    lv_obj_set_style_bg_opa(s_deny_overlay, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_deny_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    // X glyph
+    lv_obj_t *x_mark = lv_label_create(s_deny_overlay);
+    lv_label_set_text(x_mark, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_font(x_mark, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(x_mark, lv_color_white(), 0);
+    lv_obj_center(x_mark);
+
+    lv_obj_move_foreground(s_deny_overlay);
+    lv_obj_set_style_opa(s_deny_overlay, LV_OPA_COVER, 0);
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_deny_overlay);
+    lv_anim_set_exec_cb(&a, deny_overlay_opa_cb);
+    lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_TRANSP);
+    lv_anim_set_duration(&a, 200);
+    lv_anim_set_delay(&a, 500);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&a, deny_overlay_done_cb);
+    lv_anim_start(&a);
+}
+
+static void success_overlay_opa_cb(void *var, int32_t value)
+{
+    lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
+}
+
+static void success_overlay_done_cb(lv_anim_t *a)
+{
+    lv_obj_t *obj = (lv_obj_t *)a->var;
+    if (obj)
+        lv_obj_delete(obj);
+    s_success_overlay = NULL;
+}
+
+static void show_success_animation(void)
+{
+    if (s_success_overlay)
+    {
+        lv_anim_delete(s_success_overlay, NULL);
+        lv_obj_delete(s_success_overlay);
+        s_success_overlay = NULL;
+    }
+    if (s_deny_overlay)
+    {
+        lv_anim_delete(s_deny_overlay, NULL);
+        lv_obj_delete(s_deny_overlay);
+        s_deny_overlay = NULL;
+    }
+
+    reset_to_home_screen();
+
+    // Full-screen GREEN overlay — no separate circle needed
+    s_success_overlay = lv_obj_create(lv_scr_act());
+    lv_obj_remove_style_all(s_success_overlay);
+    lv_obj_set_size(s_success_overlay, 240, 240);
+    lv_obj_center(s_success_overlay);
+    lv_obj_set_style_bg_color(s_success_overlay, lv_color_hex(0x00E060), 0);
+    lv_obj_set_style_bg_opa(s_success_overlay, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_success_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Checkmark glyph, big and centered
+    lv_obj_t *check = lv_label_create(s_success_overlay);
+    lv_label_set_text(check, LV_SYMBOL_OK);
+    lv_obj_set_style_text_font(check, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(check, lv_color_white(), 0);
+    lv_obj_center(check);
+
+    lv_obj_move_foreground(s_success_overlay);
+
+    // Appear instantly at full opacity — no fade-in, avoids a slow blended
+    // entrance. Hold briefly, then a quick fade-out.
+    lv_obj_set_style_opa(s_success_overlay, LV_OPA_COVER, 0);
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_success_overlay);
+    lv_anim_set_exec_cb(&a, success_overlay_opa_cb);
+    lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_TRANSP);
+    lv_anim_set_duration(&a, 200);                  // faster fade-out
+    lv_anim_set_delay(&a, 500);                     // shorter hold
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out); // smoother easing than linear
+    lv_anim_set_completed_cb(&a, success_overlay_done_cb);
+    lv_anim_start(&a);
+}
+
 // Diagnostic-only task for touch: polls the CST816D directly (bypassing
 // LVGL's input device system) and logs raw (x, y) coordinates.
 static void touch_read_task(void *arg)
@@ -205,7 +356,7 @@ static void approve_btn_pressed_cb(lv_event_t *e)
 // pulsing flash that intensifies as the hold approaches the DENY threshold.
 static void approve_btn_pressing_cb(lv_event_t *e)
 {
-    if (!s_press_active)
+    if (!s_press_active || !s_alert_active)
         return;
 
     uint32_t held_ms = lv_tick_elaps(s_press_start_ms);
@@ -243,6 +394,10 @@ static void approve_btn_click_cb(lv_event_t *e)
     ESP_LOGI(TAG, "TAPPED APPROVE");
     const char *msg = "BTN:APPROVE\r\n";
     usb_serial_jtag_write_bytes((const uint8_t *)msg, strlen(msg), pdMS_TO_TICKS(100));
+
+    lvgl_port_lock(0);
+    show_success_animation();
+    lvgl_port_unlock();
 }
 
 // DENY — press-and-hold past the long-press threshold.
@@ -253,7 +408,7 @@ static void approve_btn_longpress_cb(lv_event_t *e)
     usb_serial_jtag_write_bytes((const uint8_t *)msg, strlen(msg), pdMS_TO_TICKS(100));
 
     lvgl_port_lock(0);
-    lv_obj_set_style_bg_color(s_approve_btn, lv_color_hex(0xFF3B30), 0);
+    show_deny_animation();
     lvgl_port_unlock();
 }
 
@@ -403,7 +558,7 @@ void app_main(void)
     lv_obj_add_event_cb(approve_btn, approve_btn_pressed_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(approve_btn, approve_btn_pressing_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(approve_btn, approve_btn_released_cb, LV_EVENT_RELEASED, NULL);
-    lv_obj_add_event_cb(approve_btn, approve_btn_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(approve_btn, approve_btn_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_add_event_cb(approve_btn, approve_btn_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_t *approve_label = lv_label_create(approve_btn);
     lv_label_set_text(approve_label, "APPROVE");
