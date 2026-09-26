@@ -1,9 +1,8 @@
-// bridge/index.js
 const AgentPagerSerial = require('./serial');
 const StatsTracker = require('./stats');
 const createServer = require('./server');
 
-const PORT_PATH = '/dev/tty.usbmodem101'; 
+const PORT_PATH = '/dev/tty.usbmodem101';
 const HTTP_PORT = 4545;
 
 const serial = new AgentPagerSerial(PORT_PATH);
@@ -16,18 +15,14 @@ serial.on('approve', () => console.log('[serial] >> APPROVE received'));
 serial.on('deny', () => console.log('[serial] >> DENY received'));
 
 const stats = new StatsTracker();
-stats.start(({ agents, totalTokens }) => {
-    // Placeholder scaling — tune once you know real usage-limit numbers.
-    const pct = Math.min(100, Math.round((totalTokens / 100000) * 100));
-    const cost = (totalTokens / 1000) * 0.003;
-
-    console.log(`[stats] agents=${agents} tokens=${totalTokens} pct=${pct}% cost=$${cost.toFixed(2)}`);
-    serial.send(`STATS:${agents}:${pct}:${cost.toFixed(2)}`);
+stats.start(({ agents, pct, costUSD }) => {
+    console.log(`[stats] agents=${agents} pct=${pct}% cost=$${costUSD.toFixed(2)}`);
+    serial.send(`STATS:${agents}:${pct}:${costUSD.toFixed(2)}`);
 });
 
 setInterval(() => {
-  stats._emitSummary();
-}, 10000); 
+    stats._emitSummary();
+}, 10000);
 
 const app = createServer(serial);
 app.listen(HTTP_PORT, () => {

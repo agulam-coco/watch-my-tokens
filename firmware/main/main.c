@@ -30,21 +30,13 @@ static const char *TAG = "main";
 
 // ── UI object handles, reachable from the serial line handler ────────────────
 static lv_obj_t *s_arc = NULL;
-static lv_obj_t *s_status_label = NULL;  // "PENDING APPROVAL" / "N agents  P%"
-static lv_obj_t *s_summary_label = NULL; // alert command text / cost / summary
-static lv_obj_t *s_serial_label = NULL;  // raw fallback for unrecognized lines
+static lv_obj_t *s_agents_label = NULL;
+static lv_obj_t *s_pct_label = NULL;
+static lv_obj_t *s_cost_label = NULL;
+static lv_obj_t *s_approve_btn = NULL;
 static bool s_alert_active = false;
-
-static void arc_anim_cb(void *var, int32_t value)
-{
-    lv_arc_set_value((lv_obj_t *)var, value);
-}
-
-// Callback for fading in the opacity of an object
-static void opa_anim_cb(void *var, int32_t value)
-{
-    lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
-}
+static uint32_t s_press_start_ms = 0;
+static bool s_press_active = false;
 
 // ── Serial protocol dispatcher ────────────────────────────────────────────────
 // Parses one complete line per the AgentPager serial spec and updates the UI.
@@ -56,26 +48,35 @@ static void opa_anim_cb(void *var, int32_t value)
 static void handle_line(const char *line)
 {
     ESP_LOGI(TAG, "Got line: %s", line);
-
     if (strncmp(line, "STATS:", 6) == 0)
     {
         int agents = 0, pct = 0;
         float cost = 0.0f;
         sscanf(line + 6, "%d:%d:%f", &agents, &pct, &cost);
-
-        char status_buf[64];
-        snprintf(status_buf, sizeof(status_buf), "%d agents  %d%%", agents, pct);
+        char agents_buf[32];
+        snprintf(agents_buf, sizeof(agents_buf), "%d AGENTS", agents);
+        char pct_buf[32];
+        snprintf(pct_buf, sizeof(pct_buf), "TOKENS %d%%", pct);
         char cost_buf[32];
-        snprintf(cost_buf, sizeof(cost_buf), "$%.2f", cost);
-
+        snprintf(cost_buf, sizeof(cost_buf), "$%.2f today", cost);
         lvgl_port_lock(0);
-        s_alert_active = false;
-        if (s_arc)
-            lv_arc_set_value(s_arc, pct);
-        if (s_status_label)
-            lv_label_set_text(s_status_label, status_buf);
-        if (s_summary_label)
-            lv_label_set_text(s_summary_label, cost_buf);
+        if (!s_alert_active)
+        {
+            if (s_arc)
+            {
+                lv_arc_set_value(s_arc, pct);
+                if (pct >= 80)
+                    lv_obj_set_style_arc_color(s_arc, lv_color_hex(0xFF3B30), LV_PART_INDICATOR);
+                else
+                    lv_obj_set_style_arc_color(s_arc, lv_color_hex(0xFF9500), LV_PART_INDICATOR);
+            }
+            if (s_agents_label)
+                lv_label_set_text(s_agents_label, agents_buf);
+            if (s_pct_label)
+                lv_label_set_text(s_pct_label, pct_buf);
+            if (s_cost_label)
+                lv_label_set_text(s_cost_label, cost_buf);
+        }
         lvgl_port_unlock();
     }
     else if (strncmp(line, "ALERT:", 6) == 0)
@@ -83,26 +84,53 @@ static void handle_line(const char *line)
         const char *cmd = line + 6;
         lvgl_port_lock(0);
         s_alert_active = true;
-        if (s_status_label)
-            lv_label_set_text(s_status_label, "PENDING APPROVAL");
-        if (s_summary_label)
-            lv_label_set_text(s_summary_label, cmd);
+        if (s_agents_label)
+            lv_label_set_text(s_agents_label, "APPROVE?");
+        if (s_pct_label)
+            lv_label_set_text(s_pct_label, cmd);
+        if (s_cost_label)
+            lv_label_set_text(s_cost_label, "");
+        if (s_cost_label)
+            lv_obj_add_flag(s_cost_label, LV_OBJ_FLAG_HIDDEN);
+        if (s_arc)
+        {
+            lv_arc_set_value(s_arc, 100);
+            lv_obj_set_style_arc_color(s_arc, lv_color_hex(0xFF3B30), LV_PART_INDICATOR);
+            lv_obj_set_style_shadow_color(s_arc, lv_color_hex(0xFF3B30), 0);
+            lv_obj_set_style_shadow_width(s_arc, 12, 0);
+            lv_obj_set_style_shadow_spread(s_arc, 0, 0);
+            lv_obj_set_style_shadow_opa(s_arc, LV_OPA_70, 0);
+        }
+        if (s_approve_btn)
+        {
+            lv_obj_clear_flag(s_approve_btn, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_bg_color(s_approve_btn, lv_color_hex(0xFF9500), 0);
+        }
+
         lvgl_port_unlock();
+        lv_refr_now(NULL);
     }
     else if (strncmp(line, "SUMMARY:", 8) == 0)
     {
         const char *text = line + 8;
         lvgl_port_lock(0);
-        if (s_summary_label && !s_alert_active)
-            lv_label_set_text(s_summary_label, text);
+        if (s_pct_label && s_alert_active)
+            lv_label_set_text(s_pct_label, text);
         lvgl_port_unlock();
     }
     else if (strncmp(line, "SCREEN:HOME", 11) == 0)
     {
         lvgl_port_lock(0);
         s_alert_active = false;
-        if (s_status_label)
-            lv_label_set_text(s_status_label, "");
+        if (s_arc)
+        {
+            lv_obj_set_style_arc_color(s_arc, lv_color_hex(0xFF9500), LV_PART_INDICATOR);
+            lv_obj_set_style_shadow_width(s_arc, 0, 0);
+        }
+        if (s_cost_label)
+            lv_obj_clear_flag(s_cost_label, LV_OBJ_FLAG_HIDDEN);
+        if (s_approve_btn)
+            lv_obj_add_flag(s_approve_btn, LV_OBJ_FLAG_HIDDEN);
         lvgl_port_unlock();
     }
     else if (strncmp(line, "SCREEN:LOG:", 11) == 0)
@@ -112,16 +140,8 @@ static void handle_line(const char *line)
         char buf[64];
         snprintf(buf, sizeof(buf), "%d approved / %d denied", approved, denied);
         lvgl_port_lock(0);
-        if (s_status_label)
-            lv_label_set_text(s_status_label, buf);
-        lvgl_port_unlock();
-    }
-    else
-    {
-        // Unknown/legacy line — echo it for debugging
-        lvgl_port_lock(0);
-        if (s_serial_label)
-            lv_label_set_text(s_serial_label, line);
+        if (s_agents_label)
+            lv_label_set_text(s_agents_label, buf);
         lvgl_port_unlock();
     }
 }
@@ -174,12 +194,67 @@ static void touch_read_task(void *arg)
     }
 }
 
-// APPROVE button tap handler — sends BTN:APPROVE back over serial.
-static void approve_btn_event_cb(lv_event_t *e)
+// Fires once when a press begins on the button.
+static void approve_btn_pressed_cb(lv_event_t *e)
+{
+    s_press_start_ms = lv_tick_get();
+    s_press_active = true;
+}
+
+// Fires repeatedly while the button is held down — used to animate a
+// pulsing flash that intensifies as the hold approaches the DENY threshold.
+static void approve_btn_pressing_cb(lv_event_t *e)
+{
+    if (!s_press_active)
+        return;
+
+    uint32_t held_ms = lv_tick_elaps(s_press_start_ms);
+    uint32_t threshold_ms = 1000; // matches lv_indev_set_long_press_time()
+
+    // Fraction of the way to DENY, clamped 0..1.
+    float frac = (float)held_ms / (float)threshold_ms;
+    if (frac > 1.0f)
+        frac = 1.0f;
+
+    // Fast pulse: alternates brightness a few times per second, and the
+    // pulse amplitude grows as frac approaches 1 — feels like it's "charging".
+    uint32_t pulse_phase = (held_ms / 100) % 2; // toggles every 100ms
+    lv_color_t base = lv_color_hex(0xFF9500);   // amber
+    lv_color_t deny = lv_color_hex(0xFF3B30);   // red
+
+    lv_color_t mixed = lv_color_mix(deny, base, (uint8_t)(frac * 255));
+    lv_color_t shown = pulse_phase ? mixed : lv_color_darken(mixed, LV_OPA_20);
+
+    lvgl_port_lock(0);
+    lv_obj_set_style_bg_color(s_approve_btn, shown, 0);
+    lvgl_port_unlock();
+}
+
+// Fires when the press ends (release or long-press completion) — resets
+// the pressing state so a stale flash doesn't linger on the next tap.
+static void approve_btn_released_cb(lv_event_t *e)
+{
+    s_press_active = false;
+}
+
+// APPROVE — short tap, released before the long-press threshold.
+static void approve_btn_click_cb(lv_event_t *e)
 {
     ESP_LOGI(TAG, "TAPPED APPROVE");
     const char *msg = "BTN:APPROVE\r\n";
     usb_serial_jtag_write_bytes((const uint8_t *)msg, strlen(msg), pdMS_TO_TICKS(100));
+}
+
+// DENY — press-and-hold past the long-press threshold.
+static void approve_btn_longpress_cb(lv_event_t *e)
+{
+    ESP_LOGI(TAG, "HELD -> DENY");
+    const char *msg = "BTN:DENY\r\n";
+    usb_serial_jtag_write_bytes((const uint8_t *)msg, strlen(msg), pdMS_TO_TICKS(100));
+
+    lvgl_port_lock(0);
+    lv_obj_set_style_bg_color(s_approve_btn, lv_color_hex(0xFF3B30), 0);
+    lvgl_port_unlock();
 }
 
 void app_main(void)
@@ -264,90 +339,81 @@ void app_main(void)
     lv_disp_t *disp = lvgl_port_add_disp(&disp_cfg);
     (void)disp;
 
-    // ── Build the UI ──────────────────────────────────────────────────────────
     ESP_LOGI(TAG, "Drawing UI");
     lvgl_port_lock(0);
-
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
 
     lv_obj_t *arc = lv_arc_create(lv_scr_act());
-    lv_obj_set_size(arc, 236, 236);
+    lv_obj_set_size(arc, 228, 228);
     lv_obj_center(arc);
     lv_arc_set_rotation(arc, 270);
     lv_arc_set_bg_angles(arc, 0, 360);
+    lv_arc_set_range(arc, 0, 100);
+    lv_arc_set_mode(arc, LV_ARC_MODE_NORMAL);
     lv_arc_set_value(arc, 0);
+    lv_obj_set_style_radius(arc, LV_RADIUS_CIRCLE, 0);
     lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
     lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
-
-    lv_obj_set_style_arc_color(arc, lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc, lv_color_hex(0x2A2100), LV_PART_MAIN);
     lv_obj_set_style_arc_width(arc, 6, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(arc, LV_OPA_COVER, LV_PART_MAIN);
-
-    lv_obj_set_style_arc_color(arc, lv_color_hex(0xFB9204), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_width(arc, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc, lv_color_hex(0xFF9500), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(arc, 10, LV_PART_INDICATOR);
     lv_obj_set_style_arc_opa(arc, LV_OPA_COVER, LV_PART_INDICATOR);
-
     lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_INDICATOR);
     lv_obj_set_style_border_width(arc, 0, LV_PART_MAIN);
     lv_obj_set_style_border_width(arc, 0, LV_PART_INDICATOR);
     lv_obj_set_style_outline_width(arc, 0, LV_PART_MAIN);
-
     s_arc = arc;
 
-    // Status line (top): "PENDING APPROVAL" or "N agents  P%"
-    s_status_label = lv_label_create(lv_scr_act());
-    lv_label_set_text(s_status_label, "");
-    lv_obj_set_style_text_color(s_status_label, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -60);
+    s_agents_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(s_agents_label, "0 AGENTS");
+    lv_obj_set_style_text_color(s_agents_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(s_agents_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_width(s_agents_label, 180);
+    lv_obj_set_style_text_align(s_agents_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_agents_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(s_agents_label, LV_ALIGN_CENTER, 0, -45);
 
-    // Summary line (middle): alert command / cost / free-text summary
-    s_summary_label = lv_label_create(lv_scr_act());
-    lv_label_set_text(s_summary_label, "");
-    lv_obj_set_style_text_color(s_summary_label, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_align(s_summary_label, LV_ALIGN_CENTER, 0, -20);
+    s_pct_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(s_pct_label, "TOKENS 0%");
+    lv_obj_set_style_text_color(s_pct_label, lv_color_hex(0x999999), 0);
+    lv_obj_set_style_text_font(s_pct_label, &lv_font_unscii_16, 0);
+    lv_obj_set_width(s_pct_label, 200);
+    lv_obj_set_height(s_pct_label, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_align(s_pct_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_pct_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(s_pct_label, LV_ALIGN_CENTER, 0, 10);
 
-    // Raw fallback line, for unrecognized input during testing
-    s_serial_label = lv_label_create(lv_scr_act());
-    lv_label_set_text(s_serial_label, "waiting...");
-    lv_obj_set_style_text_color(s_serial_label, lv_color_hex(0x888888), 0);
-    lv_obj_align(s_serial_label, LV_ALIGN_CENTER, 0, 20);
+    s_cost_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(s_cost_label, "$0.00 today");
+    lv_obj_set_style_text_color(s_cost_label, lv_color_hex(0x2ECC71), 0);
+    lv_obj_set_style_text_font(s_cost_label, &lv_font_unscii_16, 0);
+    lv_obj_align(s_cost_label, LV_ALIGN_CENTER, 0, 30);
 
-    // APPROVE button
     lv_obj_t *approve_btn = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(approve_btn, 140, 48);
+    lv_obj_set_size(approve_btn, 120, 40);
     lv_obj_set_style_radius(approve_btn, LV_RADIUS_CIRCLE, 0);
     lv_obj_align(approve_btn, LV_ALIGN_CENTER, 0, 70);
-    lv_obj_set_style_bg_color(approve_btn, lv_color_hex(0xFB9204), 0);
+    lv_obj_set_style_bg_color(approve_btn, lv_color_hex(0xFF9500), 0);
     lv_obj_set_style_shadow_width(approve_btn, 0, 0);
-    lv_obj_add_event_cb(approve_btn, approve_btn_event_cb, LV_EVENT_CLICKED, NULL);
-
+    lv_obj_add_flag(approve_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(approve_btn, approve_btn_pressed_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(approve_btn, approve_btn_pressing_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(approve_btn, approve_btn_released_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(approve_btn, approve_btn_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(approve_btn, approve_btn_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_set_style_anim_time(approve_btn, 1000, 0); // sets long-press duration to 1000ms (see note below)
     lv_obj_t *approve_label = lv_label_create(approve_btn);
     lv_label_set_text(approve_label, "APPROVE");
     lv_obj_set_style_text_color(approve_label, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_font(approve_label, &lv_font_unscii_16, 0);
     lv_obj_center(approve_label);
+    s_approve_btn = approve_btn;
 
     lvgl_port_unlock();
-
-    // Arc fill/empty demo animation (remove once STATS: is driving it live)
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, arc);
-    lv_anim_set_exec_cb(&a, arc_anim_cb);
-    lv_anim_set_values(&a, 0, 100);
-    lv_anim_set_time(&a, 2000);
-    lv_anim_set_playback_time(&a, 2000);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&a);
-
-    lv_anim_t a_opa;
-    lv_anim_init(&a_opa);
-    lv_anim_set_var(&a_opa, arc);
-    lv_anim_set_exec_cb(&a_opa, opa_anim_cb);
-    lv_anim_set_values(&a_opa, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_time(&a_opa, 1500);
-    lv_anim_set_path_cb(&a_opa, lv_anim_path_ease_out);
-    lv_anim_start(&a_opa);
 
     xTaskCreate(serial_read_task, "serial_read", 4096, NULL, 5, NULL);
 
@@ -365,6 +431,7 @@ void app_main(void)
         lv_indev_t *indev = lv_indev_create();
         lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
         lv_indev_set_read_cb(indev, cst816d_read);
+        lv_indev_set_long_press_time(indev, 1000);
     }
 
     ESP_LOGI(TAG, "Setup complete");
