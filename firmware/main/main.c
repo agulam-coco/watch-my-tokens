@@ -280,11 +280,11 @@ void app_main(void)
     lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_set_style_arc_color(arc, lv_color_hex(0x2A2A2A), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(arc, 8, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc, 6, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(arc, LV_OPA_COVER, LV_PART_MAIN);
 
     lv_obj_set_style_arc_color(arc, lv_color_hex(0xFB9204), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_width(arc, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(arc, 6, LV_PART_INDICATOR);
     lv_obj_set_style_arc_opa(arc, LV_OPA_COVER, LV_PART_INDICATOR);
 
     lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);

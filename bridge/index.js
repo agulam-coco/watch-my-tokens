@@ -25,6 +25,10 @@ stats.start(({ agents, totalTokens }) => {
     serial.send(`STATS:${agents}:${pct}:${cost.toFixed(2)}`);
 });
 
+setInterval(() => {
+  stats._emitSummary();
+}, 10000); 
+
 const app = createServer(serial);
 app.listen(HTTP_PORT, () => {
     console.log(`[http] approval server listening on :${HTTP_PORT}`);
