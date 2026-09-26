@@ -1,0 +1,15 @@
+{
+    "name": "watch-my-tokens-bridge",
+    "version": "1.0.0",
+    "description": "Serial bridge between the watch-my-tokens device and Claude Code activity",
+    "main": "index.js",
+    "scripts": {
+        "start": "node index.js"
+    },
+    "dependencies": {
+        "@serialport/parser-readline": "^12.0.0",
+        "chokidar": "^3.6.0",
+        "express": "^4.19.2",
+        "serialport": "^12.0.0"
+    }
+}
