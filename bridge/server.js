@@ -1,7 +1,36 @@
 // bridge/server.js
+require('dotenv').config();
 const express = require('express');
+const { exec } = require('child_process');
 
 const APPROVAL_TIMEOUT_MS = 25 * 1000;
+let approvedCount = 0;
+let deniedCount = 0;
+
+async function speakAlert(text) {
+    try {
+        const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL', {
+            method: 'POST',
+            headers: {
+                'xi-api-key': process.env.ELEVENLABS_API_KEY,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                text,
+                model_id: 'eleven_turbo_v2',
+            }),
+        });
+        if (!response.ok) throw new Error(`ElevenLabs error: ${response.status}`);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        const fs = require('fs');
+        const path = require('path');
+        const tmpFile = path.join('/tmp', 'agentpager-alert.mp3');
+        fs.writeFileSync(tmpFile, buffer);
+        exec(`afplay ${tmpFile}`); // macOS built-in player, since you're on a Mac
+    } catch (err) {
+        console.error('[elevenlabs] failed:', err.message);
+    }
+}
 
 function createServer(serial) {
     const app = express();
@@ -30,17 +59,48 @@ function createServer(serial) {
                 res.json({ decision });
             },
         };
+        speakAlert(`Claude wants to run: ${command}`);
         serial.send(`ALERT:${command}`);
     });
+    app.post('/debug/log', (req, res) => {
+        const { approved = approvedCount, denied = deniedCount } = req.body;
+        serial.send(`SCREEN:LOG:${approved}:${denied}`);
+        res.json({ sent: true, approved, denied });
+    });
 
-    serial.on('approve', () => {
+    function showLogThenHome() {
+        serial.send(`SCREEN:LOG:${approvedCount}:${deniedCount}`);
+        setTimeout(() => {
+            serial.send('SCREEN:HOME');
+        }, 2000);
+    };
+
+    function handleApprove() {
         if (pending) pending.resolve('allow');
-        serial.send('SCREEN:HOME');
-    });
-    serial.on('deny', () => {
+        approvedCount++;
+        showLogThenHome();
+    }
+
+    function handleDeny() {
         if (pending) pending.resolve('deny');
+        deniedCount++;
+        showLogThenHome();
+    }
+
+    serial.on('approve', handleApprove);
+    serial.on('deny', handleDeny);
+
+    function handleApprove() {
+        if (pending) pending.resolve('allow');
+        approvedCount++;
         serial.send('SCREEN:HOME');
-    });
+    }
+
+    function handleDeny() {
+        if (pending) pending.resolve('deny');
+        deniedCount++;
+        serial.send('SCREEN:HOME');
+    }
 
     return app;
 }

@@ -61,6 +61,7 @@ venv/
 .venv/
 env/
 
+
 # Language Servers
 .clangd/
 .ccls-cache/
@@ -80,3 +81,7 @@ Desktop.ini
 .vscode/
 
 .devcontainer/
+
+.env
+node_modules/
+package-lock.json

@@ -133,17 +133,17 @@ static void handle_line(const char *line)
             lv_obj_add_flag(s_approve_btn, LV_OBJ_FLAG_HIDDEN);
         lvgl_port_unlock();
     }
-    else if (strncmp(line, "SCREEN:LOG:", 11) == 0)
-    {
-        int approved = 0, denied = 0;
-        sscanf(line + 11, "%d:%d", &approved, &denied);
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%d approved / %d denied", approved, denied);
-        lvgl_port_lock(0);
-        if (s_agents_label)
-            lv_label_set_text(s_agents_label, buf);
-        lvgl_port_unlock();
-    }
+else if (strncmp(line, "SCREEN:LOG:", 11) == 0)
+{
+    int approved = 0, denied = 0;
+    sscanf(line + 11, "%d:%d", &approved, &denied);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d approved\n%d denied", approved, denied);
+    lvgl_port_lock(0);
+    if (s_agents_label)
+        lv_label_set_text(s_agents_label, buf);
+    lvgl_port_unlock();
+}
 }
 
 // Reads raw bytes directly off the USB-Serial-JTAG peripheral (this board's
@@ -405,7 +405,6 @@ void app_main(void)
     lv_obj_add_event_cb(approve_btn, approve_btn_released_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(approve_btn, approve_btn_click_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(approve_btn, approve_btn_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
-    lv_obj_set_style_anim_time(approve_btn, 1000, 0); // sets long-press duration to 1000ms (see note below)
     lv_obj_t *approve_label = lv_label_create(approve_btn);
     lv_label_set_text(approve_label, "APPROVE");
     lv_obj_set_style_text_color(approve_label, lv_color_hex(0x000000), 0);
