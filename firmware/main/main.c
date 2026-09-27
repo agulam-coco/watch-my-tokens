@@ -73,7 +73,11 @@ static void handle_line(const char *line)
         float cost = 0.0f;
         sscanf(line + 6, "%d:%d:%f", &agents, &pct, &cost);
         char agents_buf[32];
-        snprintf(agents_buf, sizeof(agents_buf), "%d AGENTS", agents);
+
+        if (agents == 1)
+            snprintf(agents_buf, sizeof(agents_buf), "%d AGENT", agents);
+        else
+            snprintf(agents_buf, sizeof(agents_buf), "%d AGENTS", agents);
         char pct_buf[32];
         snprintf(pct_buf, sizeof(pct_buf), "TOKENS %d%%", pct);
         char cost_buf[32];
