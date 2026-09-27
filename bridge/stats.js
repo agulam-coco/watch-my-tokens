@@ -25,12 +25,15 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 /** A session counts as active if it produced an assistant message within this window. */
 const ACTIVE_WINDOW_MS = 60 * 1000;
 /**
- * Token count treated as "100 %" on the device's ring. Claude Sonnet 5 (and
- * Opus 5.5 / Fable 5.1) actually have a 1,000,000-token context window;
- * 200,000 is kept as the display scale, so the ring fills 5× faster than
- * the real window.
+ * Context window size in tokens, i.e. what counts as "100 %" on the device's
+ * ring. Current Claude models have a 1,000,000-token window; the exceptions
+ * are listed in CONTEXT_WINDOW_OVERRIDES by model-id prefix.
  */
-const SONNET_CONTEXT_WINDOW = 200000;
+const DEFAULT_CONTEXT_WINDOW = 1_000_000;
+/** @type {Object<string, number>} */
+const CONTEXT_WINDOW_OVERRIDES = {
+    'claude-haiku-4-5': 200_000,
+};
 
 /**
  * Claude API first-party prices in USD per million tokens (MTok).
@@ -87,6 +90,20 @@ function ratesFor(model) {
 }
 
 /**
+ * Returns the context window size for a model.
+ *
+ * @param {string | undefined} model - The `message.model` value from a transcript.
+ * @returns {number} Window size in tokens: the matching CONTEXT_WINDOW_OVERRIDES
+ *   entry, otherwise DEFAULT_CONTEXT_WINDOW.
+ */
+function contextWindowFor(model) {
+    for (const [prefix, tokens] of Object.entries(CONTEXT_WINDOW_OVERRIDES)) {
+        if (model && model.startsWith(prefix)) return tokens;
+    }
+    return DEFAULT_CONTEXT_WINDOW;
+}
+
+/**
  * Computes the estimated USD cost of one API response.
  *
  * @param {object} usage - The `message.usage` object from a transcript entry
@@ -136,7 +153,9 @@ class StatsTracker {
     constructor() {
         /**
          * Per-session activity, keyed by Claude Code sessionId.
-         * @type {Map<string, { lastSeen: number, lastContextTokens: number }>}
+         * lastContextFraction is the latest prompt size divided by that model's
+         * context window (0..1+).
+         * @type {Map<string, { lastSeen: number, lastContextFraction: number }>}
          */
         this.sessions = new Map();
         /**
@@ -262,10 +281,10 @@ class StatsTracker {
             (usage.cache_creation_input_tokens || 0) +
             (usage.cache_read_input_tokens || 0);
 
-        const session = this.sessions.get(sessionId) || { lastSeen: 0, lastContextTokens: 0 };
+        const session = this.sessions.get(sessionId) || { lastSeen: 0, lastContextFraction: 0 };
         if (entryTime >= session.lastSeen) {
             session.lastSeen = entryTime;
-            session.lastContextTokens = contextTokens;
+            session.lastContextFraction = contextTokens / contextWindowFor(message.model);
         }
         this.sessions.set(sessionId, session);
 
@@ -286,7 +305,7 @@ class StatsTracker {
      *  - agents:  number of sessions with an assistant message in the last
      *             ACTIVE_WINDOW_MS.
      *  - pct:     context fill of the busiest active session, as a whole
-     *             percentage of SONNET_CONTEXT_WINDOW, capped at 100.
+     *             percentage of its model's context window, capped at 100.
      *  - costUSD: estimated spend across all sessions today (local time).
      *
      * @returns {void}
@@ -298,8 +317,8 @@ class StatsTracker {
 
         const agents = active.length;
 
-        const busiestContextTokens = active.reduce((max, s) => Math.max(max, s.lastContextTokens), 0);
-        const pct = Math.min(100, Math.round((busiestContextTokens / SONNET_CONTEXT_WINDOW) * 100));
+        const busiestFraction = active.reduce((max, s) => Math.max(max, s.lastContextFraction), 0);
+        const pct = Math.min(100, Math.round(busiestFraction * 100));
 
         this._onUpdate({ agents, pct, costUSD: this.costTodayUSD });
     }

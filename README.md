@@ -144,7 +144,7 @@ sequenceDiagram
 4. A session counts as **active** if it produced output in the last 60 s.
 5. The summary is sent to the device as `STATS:<agents>:<pct>:<cost>`, where
    - `agents` is the number of active sessions,
-   - `pct` is the context fill of the *busiest* active session (out of 200,000 tokens), capped at 100,
+   - `pct` is the context fill of the *busiest* active session, as a percentage of **its model's context window** (1M tokens; 200K for Haiku 4.5), capped at 100,
    - `cost` is today's estimated spend in USD across all sessions. It resets at local midnight.
 6. The summary is emitted after every transcript change **and** every 10 s, which lets idle sessions decay off the screen.
 
@@ -454,7 +454,7 @@ curl -X POST localhost:4545/debug/log -H 'Content-Type: application/json' \
 | Hook curl timeout | `hooks/pretooluse.sh` → `CURL_TIMEOUT` | 28 s |
 | TTS voice / model | `bridge/server.js` → `speakAlert()` | `EXAVITQu4vr4xnSDxMaL` / `eleven_turbo_v2_5` |
 | Active-session window | `bridge/stats.js` → `ACTIVE_WINDOW_MS` | 60 s |
-| Ring "100 %" scale | `bridge/stats.js` → `SONNET_CONTEXT_WINDOW` | 200,000 tokens *(Sonnet 5's real window is 1M; see below)* |
+| Context window (ring "100 %") | `bridge/stats.js` → `DEFAULT_CONTEXT_WINDOW` / `CONTEXT_WINDOW_OVERRIDES` | 1,000,000 tokens · `claude-haiku-4-5` 200,000 |
 | Pricing ($ / 1M tokens) | `bridge/stats.js` → `PRICING_PER_MTOK` | per model (see table below); unknown models fall back to `DEFAULT_MODEL` (`claude-sonnet-5`) |
 | Cache-write multipliers | `bridge/stats.js` → `CACHE_WRITE_*_MULTIPLIER` | 5-minute TTL 1.25 × input · 1-hour TTL 2 × input |
 | Long-press (deny) time | `firmware/main/main.c` → `lv_indev_set_long_press_time` | 1000 ms |
@@ -494,7 +494,6 @@ When Anthropic changes prices or releases a model, update `PRICING_PER_MTOK` in 
 
 ### Still approximate
 
-- **Context ring scale:** 200,000 tokens counts as "100 %", but Sonnet 5, Opus 5.5 and Fable 5.1 have a **1,000,000-token** window (Haiku 4.5 has 200K). The ring reads 5× fuller than the real window. It still works as a "this session is getting big" gauge.
 - **Not modelled:** fast mode (`usage.speed: "fast"`, premium pricing), Batch discounts, Bedrock/Vertex pricing, and server-tool fees such as web search.
 
 ---
@@ -519,7 +518,7 @@ Current limitations of the project:
 
 - **One approval at a time:** if two agents ask at once, the second one gets `ask` right away and falls back to the normal prompt.
 - **Only `Bash` is gated:** the hook matcher is `Bash`. Other tools (Edit, Write, and so on) aren't sent to the device.
-- **Cost is an estimate and the ring uses a 200K scale:** see [Cost & usage accuracy](#-cost--usage-accuracy).
+- **Cost is an estimate:** see [Cost & usage accuracy](#-cost--usage-accuracy).
 - **macOS-only audio:** voice playback uses `afplay`. On Linux or Windows, swap in another player.
 - **Hard-coded serial port:** there's no auto-detection yet.
 - **Leftovers:** `firmware/README.md` and `firmware/pytest_hello_world.py` come from the ESP-IDF *hello_world* template.
@@ -556,7 +555,9 @@ Please keep new code in the same style.
 | `77ef678` | Added this README |
 | `e53eb8d` | **`stopSpeaking()`**: voice alerts no longer talk over each other; ElevenLabs `eleven_turbo_v2_5` |
 | `9ff3aac` | JSDoc / Doxygen comments across the codebase; cost-accuracy notes |
-| — | **Accurate cost**: once per `message.id`, per-model rates, 1-hour cache writes, real daily total. Voice alerts can no longer play after a decision |
+| `3698124` | **Accurate cost**: once per `message.id`, per-model rates, 1-hour cache writes, real daily total |
+| `c43d282` | Voice alerts can no longer play after a decision |
+| — | Context ring uses each model's real window (1M; 200K for Haiku 4.5) |
 
 ---
 
@@ -564,7 +565,7 @@ Please keep new code in the same style.
 
 - Serial port auto-discovery and auto-reconnect
 - Gate more tools (Edit/Write) and show a short LLM summary with the `SUMMARY:` message
-- Per-model context windows for the ring, and fast-mode pricing
+- Fast-mode pricing
 - A queue for simultaneous approval requests
 - Swipe gestures (already decoded by the CST816D) for scrolling long commands
 - A 3D-printed enclosure
