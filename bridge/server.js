@@ -68,39 +68,20 @@ function createServer(serial) {
         res.json({ sent: true, approved, denied });
     });
 
-    function showLogThenHome() {
-        serial.send(`SCREEN:LOG:${approvedCount}:${deniedCount}`);
-        setTimeout(() => {
-            serial.send('SCREEN:HOME');
-        }, 2000);
-    };
-
     function handleApprove() {
         if (pending) pending.resolve('allow');
         approvedCount++;
-        showLogThenHome();
+        serial.send('SCREEN:HOME');
     }
 
     function handleDeny() {
         if (pending) pending.resolve('deny');
         deniedCount++;
-        showLogThenHome();
+        serial.send('SCREEN:HOME');
     }
 
     serial.on('approve', handleApprove);
     serial.on('deny', handleDeny);
-
-    function handleApprove() {
-        if (pending) pending.resolve('allow');
-        approvedCount++;
-        serial.send('SCREEN:HOME');
-    }
-
-    function handleDeny() {
-        if (pending) pending.resolve('deny');
-        deniedCount++;
-        serial.send('SCREEN:HOME');
-    }
 
     return app;
 }

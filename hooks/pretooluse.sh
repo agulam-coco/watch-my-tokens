@@ -20,7 +20,7 @@ REQUEST_BODY=$(jq -n --arg command "$COMMAND" --arg tool "$TOOL_NAME" \
   '{command: ($tool + ": " + $command)}')
 
 # Call the bridge. If it's unreachable or times out, fail open to
-# "escalate" so Claude Code falls back to its normal permission prompt
+# "ask" so Claude Code falls back to its normal permission prompt
 # instead of silently blocking or silently allowing.
 RESPONSE=$(curl -sS --max-time "$CURL_TIMEOUT" \
   -X POST "$BRIDGE_URL" \
@@ -39,7 +39,7 @@ case "$DECISION" in
     REASON="Denied on AgentPager device"
     ;;
   *)
-    PERMISSION="escalate"
+    PERMISSION="ask"
     REASON="AgentPager did not respond in time; falling back to normal prompt"
     ;;
 esac
