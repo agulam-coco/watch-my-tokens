@@ -43,10 +43,12 @@
 7. [Requirements](#-requirements)
 8. [Setup & running](#-setup--running)
 9. [Configuration reference](#-configuration-reference)
-10. [Troubleshooting](#-troubleshooting)
-11. [Known issues & limitations](#-known-issues--limitations)
-12. [Project history](#-project-history)
-13. [Roadmap ideas](#-roadmap-ideas)
+10. [Cost & usage accuracy](#-cost--usage-accuracy)
+11. [Troubleshooting](#-troubleshooting)
+12. [Known issues & limitations](#-known-issues--limitations)
+13. [Code conventions](#-code-conventions)
+14. [Project history](#-project-history)
+15. [Roadmap ideas](#-roadmap-ideas)
 
 ---
 
@@ -62,7 +64,7 @@ ESP32 display into a physical dashboard and remote control for
 | 🚨 | **Command approval pager** | When Claude Code wants to run a `Bash` command, the device lights up red, shows the command, and waits for your decision. |
 | 👆 | **Tap to allow, hold to deny** | A short tap **approves**. Pressing and holding for 1 second **denies**, and the button pulses from amber to red while you hold it. |
 | ✅ | **Clear feedback** | You get a full-screen green ✓ flash on approve and a red ✕ flash on deny, followed by an automatic return to the dashboard. |
-| 🔊 | **Spoken alerts** | Every approval request is read aloud ("*Claude wants to run: …*") using ElevenLabs text-to-speech, so you notice it even when you're looking away. |
+| 🔊 | **Spoken alerts** | Every approval request is read aloud ("*Claude wants to run: …*") using ElevenLabs text-to-speech, so you notice it even when you're looking away. A new alert or a button press cuts off any speech still playing, so voices never overlap. |
 | ⏱️ | **Safe fallback** | If nobody answers within 25 s, or the bridge isn't running, Claude Code falls back to its normal on-screen permission prompt. It never silently allows anything. |
 | 💤 | **Idle decay** | Sessions that have been quiet for 60 s drop out of the agent count, and the dashboard refreshes every 10 s so it settles back to zero. |
 
@@ -137,7 +139,7 @@ sequenceDiagram
 1. `stats.js` watches every `*.jsonl` transcript under `~/.claude/projects/` with **chokidar**.
 2. On each file change, it reads **only the new bytes** (it remembers a per-file offset), then parses each line as JSON.
 3. For every `assistant` entry that carries `message.usage`, it:
-   - adds up the **turn cost** from input, output, cache-write, and cache-read tokens at the rates in [Configuration](#-configuration-reference),
+   - adds up the **turn cost** from input, output, cache-write, and cache-read tokens at Claude Sonnet 5 rates (see [Configuration](#-configuration-reference), and [Cost & usage accuracy](#-cost--usage-accuracy) for the caveats),
    - records the **context size** of that turn (`input + cache_creation + cache_read`),
    - updates the session's `lastSeen` timestamp.
 4. A session counts as **active** if it produced output in the last 60 s.
@@ -265,8 +267,12 @@ The bridge runs on your computer. It owns the serial port and is the only thing 
 
 #### Voice alerts
 
-`speakAlert()` calls ElevenLabs `POST /v1/text-to-speech/EXAVITQu4vr4xnSDxMaL` with the `eleven_turbo_v2` model.
-It writes the MP3 to `/tmp/agentpager-alert.mp3` and plays it with macOS `afplay`.
+`speakAlert()` calls ElevenLabs `POST /v1/text-to-speech/EXAVITQu4vr4xnSDxMaL` with the `eleven_turbo_v2_5` model.
+It writes the MP3 to `/tmp/agentpager-alert.mp3` and plays it with macOS `afplay`, keeping a handle to the player process.
+
+`stopSpeaking()` kills that process (if any). It runs:
+- at the start of every new alert, so a second alert never talks over the first;
+- when the device sends `BTN:APPROVE` or `BTN:DENY`, so the voice stops as soon as you decide.
 If this step fails, it only logs an error; approvals still work.
 
 ---
@@ -443,13 +449,32 @@ curl -X POST localhost:4545/debug/log -H 'Content-Type: application/json' \
 | Stats heartbeat | `bridge/index.js` → `setInterval` | 10 s |
 | Approval timeout | `bridge/server.js` → `APPROVAL_TIMEOUT_MS` | 25 s |
 | Hook curl timeout | `hooks/pretooluse.sh` → `CURL_TIMEOUT` | 28 s |
-| TTS voice / model | `bridge/server.js` → `speakAlert()` | `EXAVITQu4vr4xnSDxMaL` / `eleven_turbo_v2` |
+| TTS voice / model | `bridge/server.js` → `speakAlert()` | `EXAVITQu4vr4xnSDxMaL` / `eleven_turbo_v2_5` |
 | Active-session window | `bridge/stats.js` → `ACTIVE_WINDOW_MS` | 60 s |
-| Context window size | `bridge/stats.js` → `SONNET_CONTEXT_WINDOW` | 200,000 tokens |
+| Ring "100 %" scale | `bridge/stats.js` → `SONNET_CONTEXT_WINDOW` | 200,000 tokens *(Sonnet 5's real window is 1M; see below)* |
 | Pricing ($ / 1M tokens) | `bridge/stats.js` → `PRICE_*` | input 2.00 · output 10.00 · cache write 2.50 · cache read 0.20 |
 | Long-press (deny) time | `firmware/main/main.c` → `lv_indev_set_long_press_time` | 1000 ms |
 | Red-ring threshold | `firmware/main/main.c` → `handle_line` | ≥ 80 % |
 | Display / touch pins | `main.c` / `touch_driver.h` | see [Pinout](#pinout-as-used-in-firmware) |
+
+---
+
+## 💲 Cost & usage accuracy
+
+While documenting `stats.js`, I compared its numbers against the current Claude API pricing and against real Claude Code transcripts.
+The **per-token rates are correct for Claude Sonnet 5**, but a few assumptions make the dashboard numbers approximate.
+The code comments now describe these; the behaviour is unchanged.
+
+| # | What the code does | Reality | Effect on the device |
+|---|---|---|---|
+| 1 | Counts every `assistant` line in a transcript. | Claude Code writes **one line per content block** (text, tool call, …), and each line repeats the same `message.usage`. In one real session, 44 lines covered 20 API messages. | 💲 **Cost is overstated**, roughly 2× in typical tool-heavy sessions. It should de-duplicate by `message.id`. |
+| 2 | Prices everything at **Sonnet 5** rates: $2 in / $10 out / $2.50 cache write / $0.20 cache read per MTok. | Sessions can run on any model (e.g. this repo's own sessions use `claude-opus-5-5` at $4 / $20). The model is recorded in `message.model`. | 💲 Cost is wrong whenever the session isn't on Sonnet 5. |
+| 3 | Prices all cache writes at the **5-minute TTL** rate (1.25× input). | Claude Code's cache writes are mostly **1-hour TTL** (2× input = $4.00/MTok on Sonnet 5). The split is in `usage.cache_creation.ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens`. | 💲 Cache-write cost is understated by about 37 %. |
+| 4 | Treats 200,000 tokens as a full context window. | Sonnet 5, Opus 5.5 and Fable 5.1 have a **1,000,000-token** window (Haiku 4.5 has 200K). | 🟠 The ring reads 5× fuller than the real window. It is still useful as a "this session is getting big" gauge. |
+| 5 | Labels the total `$X.XX today`. | It's the sum over sessions active in the last 60 s, accumulated since the bridge started. | 🏷️ The label is misleading; it isn't a daily total. |
+
+Fixing 1–3 means de-duplicating by `message.id`, choosing the rate table from `message.model`, and splitting cache writes by TTL.
+Fixing 4 is a one-line constant change, if you'd rather the ring show the true window.
 
 ---
 
@@ -473,11 +498,25 @@ Current limitations of the project:
 
 - **One approval at a time:** if two agents ask at once, the second one gets `ask` right away and falls back to the normal prompt.
 - **Only `Bash` is gated:** the hook matcher is `Bash`. Other tools (Edit, Write, and so on) aren't sent to the device.
-- **The cost label says "today"**, but it's actually the total for *currently active* sessions (since the bridge started). It isn't a calendar-day total.
-- **Fixed pricing and context size:** the cost uses a single price table and assumes a 200k context window for every model.
+- **Cost and context % are approximations:** see [Cost & usage accuracy](#-cost--usage-accuracy).
+- **Voice can play after you decide:** `stopSpeaking()` only stops audio that is already playing. If you tap or hold while the ElevenLabs request is still downloading, that clip starts playing afterwards.
 - **macOS-only audio:** voice playback uses `afplay`. On Linux or Windows, swap in another player.
 - **Hard-coded serial port:** there's no auto-detection yet.
-- **Leftovers:** `firmware/README.md` and `firmware/pytest_hello_world.py` come from the ESP-IDF *hello_world* template. The empty `REAMDE.md` at the root is a typo'd stub.
+- **Leftovers:** `firmware/README.md` and `firmware/pytest_hello_world.py` come from the ESP-IDF *hello_world* template.
+
+---
+
+## 📝 Code conventions
+
+Every source file starts with a header comment explaining what it's for. Every function documents its purpose, parameters, return value and side effects:
+
+| Language | Style | Example tags |
+|---|---|---|
+| JavaScript (`bridge/`) | [JSDoc](https://jsdoc.app/) | `@file`, `@param {type}`, `@returns`, `@private`, `@extends` |
+| C (`firmware/main/`) | [Doxygen](https://www.doxygen.nl/) | `@file`, `@brief`, `@param`, `@return` |
+| Bash (`hooks/`) | Header block | Input (stdin), Output (stdout), Exit status, Dependencies |
+
+Please keep new code in the same style.
 
 ---
 
@@ -492,6 +531,11 @@ Current limitations of the project:
 | `f4d7c90` | Default action on timeout; button grows on press; **long-press = deny, tap = approve** |
 | `91c3b1a` | **ElevenLabs** voice read-out of incoming commands |
 | `37ac11c` | Green ✓ / red ✕ **allow & deny animations**; fixed screen transition bug |
+| `d3edb9c` | Stopped tracking `bridge/node_modules/` and `package-lock.json` |
+| `f0bdd88` | Hook falls back to `ask`; removed shadowed duplicate button handlers |
+| `77ef678` | Added this README |
+| `e53eb8d` | **`stopSpeaking()`**: voice alerts no longer talk over each other; ElevenLabs `eleven_turbo_v2_5` |
+| — | JSDoc / Doxygen comments across the codebase; cost-accuracy notes |
 
 ---
 
@@ -499,7 +543,7 @@ Current limitations of the project:
 
 - Serial port auto-discovery and auto-reconnect
 - Gate more tools (Edit/Write) and show a short LLM summary with the `SUMMARY:` message
-- A per-model price table and real daily cost totals
+- Accurate cost: de-duplicate by `message.id`, per-model rates, 1-hour cache-write pricing, real daily totals
 - A queue for simultaneous approval requests
 - Swipe gestures (already decoded by the CST816D) for scrolling long commands
 - A 3D-printed enclosure

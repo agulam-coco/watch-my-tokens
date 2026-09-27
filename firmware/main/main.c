@@ -1,3 +1,12 @@
+/**
+ * @file main.c
+ * @brief watch-my-tokens (AgentPager) firmware for the ESP32-2424S012C
+ *        (ESP32-C3 + 1.28" GC9A01 round LCD + CST816D touch).
+ *
+ * Shows Claude Code usage stats sent by the bridge over USB-Serial-JTAG, and
+ * turns into an approval prompt when the bridge sends ALERT:. A short tap on
+ * the button sends BTN:APPROVE; holding it for 1 s sends BTN:DENY.
+ */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -17,7 +26,7 @@
 
 static const char *TAG = "main";
 
-// Confirmed pinout for ESP32-2424S012C-Y
+// ── LCD pinout, confirmed on the ESP32-2424S012C-Y ───────────────────────────
 #define PIN_MOSI 7
 #define PIN_SCLK 6
 #define PIN_CS 10
@@ -28,25 +37,33 @@ static const char *TAG = "main";
 #define LCD_H_RES 240
 #define LCD_V_RES 240
 
-// ── UI object handles, reachable from the serial line handler ────────────────
+// ── UI state shared by the serial handler and the LVGL event callbacks ───────
+// LVGL objects created in app_main() and updated from other tasks/callbacks.
 static lv_obj_t *s_arc = NULL;
 static lv_obj_t *s_agents_label = NULL;
 static lv_obj_t *s_pct_label = NULL;
 static lv_obj_t *s_cost_label = NULL;
 static lv_obj_t *s_approve_btn = NULL;
-static bool s_alert_active = false;
-static uint32_t s_press_start_ms = 0;
-static bool s_press_active = false;
-static lv_obj_t *s_success_overlay = NULL;
-static lv_obj_t *s_deny_overlay = NULL;
+static bool s_alert_active = false;        // true while an ALERT: prompt is on screen
+static uint32_t s_press_start_ms = 0;      // lv_tick at which the current button press began
+static bool s_press_active = false;        // true while the button is being held
+static lv_obj_t *s_success_overlay = NULL; // green ✓ overlay, or NULL when not showing
+static lv_obj_t *s_deny_overlay = NULL;    // red ✕ overlay, or NULL when not showing
 
 // ── Serial protocol dispatcher ────────────────────────────────────────────────
-// Parses one complete line per the AgentPager serial spec and updates the UI.
-//   STATS:<agents>:<pct>:<cost>
-//   ALERT:<command text>
-//   SUMMARY:<text>
-//   SCREEN:HOME
-//   SCREEN:LOG:<approved>:<denied>
+/**
+ * @brief  Parses one line from the bridge and updates the UI. Takes the LVGL
+ *         lock itself, so it is safe to call from a non-LVGL task.
+ *
+ *         Supported messages (unknown lines are logged and ignored):
+ *           STATS:<agents>:<pct>:<cost>    update ring and labels (ignored during an alert)
+ *           ALERT:<command text>           show the approval prompt
+ *           SUMMARY:<text>                 replace the command text during an alert
+ *           SCREEN:HOME                    leave alert mode, restore dashboard styling
+ *           SCREEN:LOG:<approved>:<denied> show the approve/deny tally
+ *
+ * @param  line  NUL-terminated line without the trailing newline.
+ */
 static void handle_line(const char *line)
 {
     ESP_LOGI(TAG, "Got line: %s", line);
@@ -147,9 +164,16 @@ static void handle_line(const char *line)
     }
 }
 
-// Reads raw bytes directly off the USB-Serial-JTAG peripheral (this board's
-// USB port only exposes USB-Serial-JTAG, not UART0's GPIO pins), assembles
-// them into lines, and dispatches each complete line to handle_line().
+/**
+ * @brief  FreeRTOS task that reads bytes from USB-Serial-JTAG, assembles them
+ *         into lines and passes each complete line to handle_line().
+ *
+ *         This board's USB port only exposes USB-Serial-JTAG, not UART0, so
+ *         all host communication goes through it. Lines end at '\n' or '\r';
+ *         characters past 127 in one line are dropped. Never returns.
+ *
+ * @param  arg  Unused.
+ */
 static void serial_read_task(void *arg)
 {
     uint8_t byte;
@@ -180,9 +204,15 @@ static void serial_read_task(void *arg)
     }
 }
 
-// Resets the base screen (arc/labels/button) back to home state. Same logic
-// as the SCREEN:HOME handler in handle_line(), factored out so the device can
-// self-reset immediately on approve without waiting on the bridge.
+/**
+ * @brief  Puts the dashboard back in its home state (amber ring at 0, default
+ *         labels, button hidden) so the device can reset itself right after a
+ *         tap or hold, without waiting for the bridge. The next STATS: line
+ *         fills in the real values.
+ *
+ *         Unlike SCREEN:HOME, this also resets the label text and ring value.
+ *         Caller must hold the LVGL lock.
+ */
 static void reset_to_home_screen(void)
 {
     s_alert_active = false;
@@ -205,11 +235,21 @@ static void reset_to_home_screen(void)
         lv_obj_add_flag(s_approve_btn, LV_OBJ_FLAG_HIDDEN);
 }
 
+/**
+ * @brief  LVGL animation step for the deny overlay's fade-out.
+ * @param  var    The overlay object (lv_obj_t *).
+ * @param  value  Current opacity, LV_OPA_COVER down to LV_OPA_TRANSP.
+ */
 static void deny_overlay_opa_cb(void *var, int32_t value)
 {
     lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
 }
 
+/**
+ * @brief  Runs when the deny fade-out finishes: deletes the overlay and clears
+ *         s_deny_overlay.
+ * @param  a  The finished animation; a->var is the overlay object.
+ */
 static void deny_overlay_done_cb(lv_anim_t *a)
 {
     lv_obj_t *obj = (lv_obj_t *)a->var;
@@ -218,6 +258,11 @@ static void deny_overlay_done_cb(lv_anim_t *a)
     s_deny_overlay = NULL;
 }
 
+/**
+ * @brief  Resets to the home screen, then flashes a full-screen red overlay
+ *         with an ✕ (held 500 ms, then a 200 ms fade-out). Any overlay already
+ *         showing is removed first. Caller must hold the LVGL lock.
+ */
 static void show_deny_animation(void)
 {
     if (s_success_overlay)
@@ -266,11 +311,21 @@ static void show_deny_animation(void)
     lv_anim_start(&a);
 }
 
+/**
+ * @brief  LVGL animation step for the success overlay's fade-out.
+ * @param  var    The overlay object (lv_obj_t *).
+ * @param  value  Current opacity, LV_OPA_COVER down to LV_OPA_TRANSP.
+ */
 static void success_overlay_opa_cb(void *var, int32_t value)
 {
     lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
 }
 
+/**
+ * @brief  Runs when the success fade-out finishes: deletes the overlay and
+ *         clears s_success_overlay.
+ * @param  a  The finished animation; a->var is the overlay object.
+ */
 static void success_overlay_done_cb(lv_anim_t *a)
 {
     lv_obj_t *obj = (lv_obj_t *)a->var;
@@ -279,6 +334,11 @@ static void success_overlay_done_cb(lv_anim_t *a)
     s_success_overlay = NULL;
 }
 
+/**
+ * @brief  Resets to the home screen, then flashes a full-screen green overlay
+ *         with a ✓ (held 500 ms, then a 200 ms fade-out). Any overlay already
+ *         showing is removed first. Caller must hold the LVGL lock.
+ */
 static void show_success_animation(void)
 {
     if (s_success_overlay)
@@ -330,8 +390,12 @@ static void show_success_animation(void)
     lv_anim_start(&a);
 }
 
-// Diagnostic-only task for touch: polls the CST816D directly (bypassing
-// LVGL's input device system) and logs raw (x, y) coordinates.
+/**
+ * @brief  Diagnostic FreeRTOS task: polls the CST816D every 30 ms, bypassing
+ *         LVGL, and logs "TOUCH x=.. y=.." while a finger is down. It does not
+ *         affect the UI. Never returns.
+ * @param  arg  Unused.
+ */
 static void touch_read_task(void *arg)
 {
     while (1)
@@ -345,15 +409,24 @@ static void touch_read_task(void *arg)
     }
 }
 
-// Fires once when a press begins on the button.
+/**
+ * @brief  LV_EVENT_PRESSED handler: records when the press started so that
+ *         approve_btn_pressing_cb() can measure the hold time.
+ * @param  e  The LVGL event (unused).
+ */
 static void approve_btn_pressed_cb(lv_event_t *e)
 {
     s_press_start_ms = lv_tick_get();
     s_press_active = true;
 }
 
-// Fires repeatedly while the button is held down — used to animate a
-// pulsing flash that intensifies as the hold approaches the DENY threshold.
+/**
+ * @brief  LV_EVENT_PRESSING handler, called repeatedly while the button is
+ *         held. Blends the button colour from amber toward red in proportion
+ *         to the hold time (full red at the 1 s DENY threshold) and flickers
+ *         it every 100 ms. Does nothing unless an alert is showing.
+ * @param  e  The LVGL event (unused).
+ */
 static void approve_btn_pressing_cb(lv_event_t *e)
 {
     if (!s_press_active || !s_alert_active)
@@ -381,14 +454,20 @@ static void approve_btn_pressing_cb(lv_event_t *e)
     lvgl_port_unlock();
 }
 
-// Fires when the press ends (release or long-press completion) — resets
-// the pressing state so a stale flash doesn't linger on the next tap.
+/**
+ * @brief  LV_EVENT_RELEASED handler: ends the hold so the pulsing effect stops.
+ * @param  e  The LVGL event (unused).
+ */
 static void approve_btn_released_cb(lv_event_t *e)
 {
     s_press_active = false;
 }
 
-// APPROVE — short tap, released before the long-press threshold.
+/**
+ * @brief  LV_EVENT_SHORT_CLICKED handler (tap released before 1 s): sends
+ *         "BTN:APPROVE" to the bridge and plays the green success animation.
+ * @param  e  The LVGL event (unused).
+ */
 static void approve_btn_click_cb(lv_event_t *e)
 {
     ESP_LOGI(TAG, "TAPPED APPROVE");
@@ -400,7 +479,11 @@ static void approve_btn_click_cb(lv_event_t *e)
     lvgl_port_unlock();
 }
 
-// DENY — press-and-hold past the long-press threshold.
+/**
+ * @brief  LV_EVENT_LONG_PRESSED handler (held for 1 s): sends "BTN:DENY" to
+ *         the bridge and plays the red deny animation.
+ * @param  e  The LVGL event (unused).
+ */
 static void approve_btn_longpress_cb(lv_event_t *e)
 {
     ESP_LOGI(TAG, "HELD -> DENY");
@@ -412,6 +495,12 @@ static void approve_btn_longpress_cb(lv_event_t *e)
     lvgl_port_unlock();
 }
 
+/**
+ * @brief  Firmware entry point. Brings up USB-Serial-JTAG, the backlight, the
+ *         SPI bus and GC9A01 panel, and LVGL; draws the dashboard; starts the
+ *         serial reader task; then starts touch input. Afterwards it idles
+ *         forever while the tasks and LVGL do the work.
+ */
 void app_main(void)
 {
     ESP_LOGI(TAG, "Installing USB-Serial-JTAG driver");

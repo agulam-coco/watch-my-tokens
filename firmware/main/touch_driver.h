@@ -1,6 +1,10 @@
-// touch_driver.h
-// CST816D capacitive touch driver — ESP-IDF v5/v6 new I2C API
-// Uses driver/i2c_master.h (NOT the legacy driver/i2c.h)
+/**
+ * @file touch_driver.h
+ * @brief CST816D capacitive touch driver for the ESP32-2424S012C board.
+ *
+ * Uses the ESP-IDF v5/v6 I2C master API (driver/i2c_master.h), not the legacy
+ * driver/i2c.h. The chip is polled; the INT pin is not used.
+ */
 
 #pragma once
 
@@ -56,23 +60,36 @@
 // ── Public functions ──────────────────────────────────────────────────────────
 
 /**
- * @brief  Initialise I2C bus and CST816D touch IC.
- *         Call once during startup, after lvgl_port_init().
- * @return ESP_OK on success.
+ * @brief  Creates the I2C master bus, registers the CST816D on it and
+ *         hardware-resets the chip.
+ *
+ *         Call once at startup, after lvgl_port_init() and before registering
+ *         cst816d_read() as an LVGL input device.
+ *
+ * @return ESP_OK on success, or the esp_err_t from i2c_new_master_bus() /
+ *         i2c_master_bus_add_device() if bus or device setup fails.
  */
 esp_err_t cst816d_init(void);
 
 /**
- * @brief  LVGL input device read callback.
- *         Register as lv_indev_t.read_cb — LVGL calls this every ~5ms.
- *         Not wired into anything yet — use cst816d_read_raw() for the
- *         raw diagnostic test first (Task 0.4 step 3).
+ * @brief  LVGL input-device read callback. Registered with
+ *         lv_indev_set_read_cb() in app_main(); LVGL calls it on every input
+ *         poll.
+ *
+ * @param  indev  The LVGL input device being read (unused).
+ * @param  data   Output. Receives the touch point and
+ *                LV_INDEV_STATE_PR while a finger is down, otherwise
+ *                LV_INDEV_STATE_REL (point left unchanged).
  */
 void cst816d_read(lv_indev_t *indev, lv_indev_data_t *data);
 
 /**
- * @brief  Raw, non-LVGL touch read for diagnostics.
- *         Returns true and fills out_x/out_y if a finger is currently
- *         down; returns false if no touch or the chip didn't respond.
+ * @brief  Reads the current touch point directly from the chip, without LVGL.
+ *         Used by cst816d_read() and by the diagnostic touch_read_task.
+ *
+ * @param  out_x  Output. X coordinate, clamped to 0..239. Only written on true.
+ * @param  out_y  Output. Y coordinate, clamped to 0..239. Only written on true.
+ * @return true if a finger is down; false if there is no touch or the chip
+ *         did not respond on I2C.
  */
 bool cst816d_read_raw(uint16_t *out_x, uint16_t *out_y);

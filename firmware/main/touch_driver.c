@@ -1,5 +1,8 @@
-// touch_driver.c
-// CST816D touch driver using ESP-IDF v5/v6 new I2C master API.
+/**
+ * @file touch_driver.c
+ * @brief CST816D touch driver implementation (ESP-IDF v5/v6 I2C master API).
+ *        See touch_driver.h for the public API and register layout.
+ */
 #include "touch_driver.h"
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
@@ -20,6 +23,10 @@ static i2c_master_bus_handle_t s_bus_handle = NULL;
 static i2c_master_dev_handle_t s_dev_handle = NULL;
 
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * @brief  Creates the I2C bus, adds the CST816D and hardware-resets it.
+ * @return ESP_OK on success, or the I2C setup error. See touch_driver.h.
+ */
 esp_err_t cst816d_init(void)
 {
     esp_err_t err;
@@ -74,10 +81,13 @@ esp_err_t cst816d_init(void)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Raw read for diagnostics — returns true if a finger is currently down,
-// and fills out_x/out_y. Used directly (bypassing LVGL) for Task 0.4's
-// first test: confirm the chip responds and coordinates look sane before
-// wiring this into any UI.
+/**
+ * @brief  Reads the 6-byte touch report and decodes the first touch point.
+ *
+ * @param  out_x  Output. X coordinate, clamped to 0..239. Only written on true.
+ * @param  out_y  Output. Y coordinate, clamped to 0..239. Only written on true.
+ * @return true if a finger is down; false if no touch or the I2C read failed.
+ */
 bool cst816d_read_raw(uint16_t *out_x, uint16_t *out_y)
 {
     uint8_t reg = TOUCH_REG_DATA_START;    // register to start reading from
@@ -128,9 +138,12 @@ bool cst816d_read_raw(uint16_t *out_x, uint16_t *out_y)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LVGL input device read callback — register as lv_indev_t.read_cb once
-// you're ready to wire touch into the UI (Task 0.4 step 5 onward).
-// Not called anywhere yet during raw diagnostics.
+/**
+ * @brief  LVGL input-device read callback, registered in app_main().
+ *
+ * @param  indev  The LVGL input device being read (unused).
+ * @param  data   Output. Touch point and pressed/released state for LVGL.
+ */
 void cst816d_read(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev; // suppress unused-parameter warning
