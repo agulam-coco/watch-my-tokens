@@ -1,21 +1,27 @@
-<!--
-  HERO IMAGE / ICON PLACEHOLDERS
-  When the artwork is ready, drop the files into docs/images/ and uncomment:
-
-  <p align="center">
-    <img src="docs/images/icon.png" alt="watch-my-tokens icon" width="96" />
-  </p>
-  <p align="center">
-    <img src="docs/images/watch-my-tokens.png" alt="watch-my-tokens device" width="480" />
-  </p>
--->
-
-<h1 align="center">⌚ watch-my-tokens</h1>
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-lockup-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="assets/brand/logo-lockup.svg" />
+    <img src="assets/brand/logo-lockup.svg" alt="Watch My Tokens" width="460" />
+  </picture>
+</h1>
 
 <p align="center">
   <b>A round, touch-screen desk companion for Claude Code.</b><br/>
   See your active agents, context usage, and spend at a glance, and approve or deny
   Claude's shell commands with a tap, without ever switching windows.
+</p>
+
+<p align="center">
+  <a href="#-what-it-does">Features</a>
+  &nbsp;·&nbsp;
+  <a href="#-how-it-works">How it works</a>
+  &nbsp;·&nbsp;
+  <a href="#-hardware">Hardware</a>
+  &nbsp;·&nbsp;
+  <a href="#-setup--running">Setup</a>
+  &nbsp;·&nbsp;
+  <a href="#-troubleshooting">Troubleshooting</a>
 </p>
 
 <p align="center">
@@ -177,6 +183,9 @@ sequenceDiagram
 ```text
 watch-my-tokens/
 ├── README.md                ← you are here
+├── assets/
+│   ├── brand/               ← logo (SVG + PNG), app icon, social preview, Devpost thumbnail
+│   └── source/              ← original raster logo exports the vectors were traced from
 ├── bridge/                  ← Node.js bridge between Claude Code and the device
 │   ├── index.js             ← entry point: wires serial + stats + HTTP together
 │   ├── serial.js            ← AgentPagerSerial: line-based SerialPort wrapper (EventEmitter)
