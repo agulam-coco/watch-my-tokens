@@ -1,24 +1,29 @@
 // bridge/server.js
 require('dotenv').config();
 const express = require('express');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 
 const APPROVAL_TIMEOUT_MS = 25 * 1000;
 let approvedCount = 0;
 let deniedCount = 0;
 
+let currentAudioProcess = null;
+
+function stopSpeaking() {
+    if (currentAudioProcess) {
+        currentAudioProcess.kill('SIGKILL');
+        currentAudioProcess = null;
+    }
+}
+
 async function speakAlert(text) {
     try {
+        stopSpeaking();
+
         const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL', {
             method: 'POST',
-            headers: {
-                'xi-api-key': process.env.ELEVENLABS_API_KEY,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                text,
-                model_id: 'eleven_turbo_v2',
-            }),
+            headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, model_id: 'eleven_turbo_v2_5' }),
         });
         if (!response.ok) throw new Error(`ElevenLabs error: ${response.status}`);
         const buffer = Buffer.from(await response.arrayBuffer());
@@ -26,7 +31,11 @@ async function speakAlert(text) {
         const path = require('path');
         const tmpFile = path.join('/tmp', 'agentpager-alert.mp3');
         fs.writeFileSync(tmpFile, buffer);
-        exec(`afplay ${tmpFile}`); // macOS built-in player, since you're on a Mac
+
+        currentAudioProcess = spawn('afplay', [tmpFile]);
+        currentAudioProcess.on('exit', () => {
+            currentAudioProcess = null;
+        });
     } catch (err) {
         console.error('[elevenlabs] failed:', err.message);
     }
@@ -69,12 +78,14 @@ function createServer(serial) {
     });
 
     function handleApprove() {
+        stopSpeaking();
         if (pending) pending.resolve('allow');
         approvedCount++;
         serial.send('SCREEN:HOME');
     }
 
     function handleDeny() {
+        stopSpeaking();
         if (pending) pending.resolve('deny');
         deniedCount++;
         serial.send('SCREEN:HOME');
