@@ -19,14 +19,28 @@ let deniedCount = 0;
 
 /** The afplay child process that is currently speaking, or null when silent. */
 let currentAudioProcess = null;
+/** Cancels the in-flight ElevenLabs download, or null when none is running. */
+let currentAbort = null;
+/**
+ * Incremented by every stopSpeaking() call. Each speakAlert() remembers the
+ * value it started with; if it has changed by the time the audio arrives,
+ * that alert was superseded or already answered and must not play.
+ */
+let speechGeneration = 0;
 
 /**
- * Stops any voice alert that is currently playing so that a new alert, or a
- * button decision, never overlaps with old audio.
+ * Silences voice alerts: cancels any ElevenLabs download still in flight,
+ * kills any audio that is playing, and marks every earlier speakAlert() call
+ * as stale so that it never starts playing later.
  *
  * @returns {void}
  */
 function stopSpeaking() {
+    speechGeneration++;
+    if (currentAbort) {
+        currentAbort.abort();
+        currentAbort = null;
+    }
     if (currentAudioProcess) {
         currentAudioProcess.kill('SIGKILL');
         currentAudioProcess = null;
@@ -35,34 +49,49 @@ function stopSpeaking() {
 
 /**
  * Converts text to speech with ElevenLabs and plays it through the macOS
- * `afplay` player. Any alert that is already playing is stopped first.
- * Failures (missing API key, network error, non-2xx response) are logged and
- * swallowed so they never block an approval.
+ * `afplay` player. Any earlier alert is stopped first. If stopSpeaking() is
+ * called while the audio is downloading, the download is cancelled and the
+ * clip is never played. Failures (missing API key, network error, non-2xx
+ * response) are logged and swallowed so they never block an approval.
  *
  * @param {string} text - The sentence to speak, e.g. "Claude wants to run: Bash: ls".
- * @returns {Promise<void>} Resolves once playback has *started* (not finished).
+ * @returns {Promise<void>} Resolves once playback has *started* (not finished),
+ *   or once the alert has been abandoned.
  */
 async function speakAlert(text) {
-    try {
-        stopSpeaking();
+    stopSpeaking();
+    const myGeneration = speechGeneration;
+    const abort = new AbortController();
+    currentAbort = abort;
 
+    try {
         const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL', {
             method: 'POST',
             headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json' },
             body: JSON.stringify({ text, model_id: 'eleven_turbo_v2_5' }),
+            signal: abort.signal,
         });
         if (!response.ok) throw new Error(`ElevenLabs error: ${response.status}`);
         const buffer = Buffer.from(await response.arrayBuffer());
+
+        // A newer alert or a button decision happened while downloading.
+        if (myGeneration !== speechGeneration) return;
+        currentAbort = null;
+
         const fs = require('fs');
         const path = require('path');
         const tmpFile = path.join('/tmp', 'agentpager-alert.mp3');
         fs.writeFileSync(tmpFile, buffer);
 
-        currentAudioProcess = spawn('afplay', [tmpFile]);
-        currentAudioProcess.on('exit', () => {
-            currentAudioProcess = null;
+        const proc = spawn('afplay', [tmpFile]);
+        currentAudioProcess = proc;
+        proc.on('exit', () => {
+            // Only clear the handle if a newer clip hasn't replaced this one.
+            if (currentAudioProcess === proc) currentAudioProcess = null;
         });
     } catch (err) {
+        if (err.name === 'AbortError') return; // cancelled by stopSpeaking()
+        if (currentAbort === abort) currentAbort = null;
         console.error('[elevenlabs] failed:', err.message);
     }
 }
@@ -104,6 +133,7 @@ function createServer(serial) {
             if (settled) return;
             settled = true;
             pending = null;
+            stopSpeaking();
             res.json({ decision: 'ask' });
             serial.send('SCREEN:HOME');
         }, APPROVAL_TIMEOUT_MS);

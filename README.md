@@ -60,7 +60,7 @@ ESP32 display into a physical dashboard and remote control for
 
 | | Feature | Details |
 |---|---|---|
-| 📊 | **Live usage dashboard** | A glowing ring shows how full the busiest session's context window is, along with the number of active agents and the dollar cost of those sessions. |
+| 📊 | **Live usage dashboard** | A glowing ring shows how full the busiest session's context window is, along with the number of active agents and today's estimated Claude spend. |
 | 🚨 | **Command approval pager** | When Claude Code wants to run a `Bash` command, the device lights up red, shows the command, and waits for your decision. |
 | 👆 | **Tap to allow, hold to deny** | A short tap **approves**. Pressing and holding for 1 second **denies**, and the button pulses from amber to red while you hold it. |
 | ✅ | **Clear feedback** | You get a full-screen green ✓ flash on approve and a red ✕ flash on deny, followed by an automatic return to the dashboard. |
@@ -139,14 +139,13 @@ sequenceDiagram
 1. `stats.js` watches every `*.jsonl` transcript under `~/.claude/projects/` with **chokidar**.
 2. On each file change, it reads **only the new bytes** (it remembers a per-file offset), then parses each line as JSON.
 3. For every `assistant` entry that carries `message.usage`, it:
-   - adds up the **turn cost** from input, output, cache-write, and cache-read tokens at Claude Sonnet 5 rates (see [Configuration](#-configuration-reference), and [Cost & usage accuracy](#-cost--usage-accuracy) for the caveats),
-   - records the **context size** of that turn (`input + cache_creation + cache_read`),
-   - updates the session's `lastSeen` timestamp.
+   - records the **context size** of that turn (`input + cache_creation + cache_read`) and sets the session's `lastSeen` to the entry's own `timestamp`,
+   - if the entry is from **today** (local time), prices it with the **rates for its `message.model`** and adds it to today's total **once per `message.id`** (see [Cost & usage accuracy](#-cost--usage-accuracy)).
 4. A session counts as **active** if it produced output in the last 60 s.
 5. The summary is sent to the device as `STATS:<agents>:<pct>:<cost>`, where
    - `agents` is the number of active sessions,
    - `pct` is the context fill of the *busiest* active session (out of 200,000 tokens), capped at 100,
-   - `cost` is the total USD across active sessions.
+   - `cost` is today's estimated spend in USD across all sessions. It resets at local midnight.
 6. The summary is emitted after every transcript change **and** every 10 s, which lets idle sessions decay off the screen.
 
 ---
@@ -270,9 +269,13 @@ The bridge runs on your computer. It owns the serial port and is the only thing 
 `speakAlert()` calls ElevenLabs `POST /v1/text-to-speech/EXAVITQu4vr4xnSDxMaL` with the `eleven_turbo_v2_5` model.
 It writes the MP3 to `/tmp/agentpager-alert.mp3` and plays it with macOS `afplay`, keeping a handle to the player process.
 
-`stopSpeaking()` kills that process (if any). It runs:
-- at the start of every new alert, so a second alert never talks over the first;
-- when the device sends `BTN:APPROVE` or `BTN:DENY`, so the voice stops as soon as you decide.
+`stopSpeaking()` silences everything related to voice alerts:
+- it cancels any ElevenLabs download still in flight (an `AbortController`), so you don't pay for clips nobody hears;
+- it kills the `afplay` process if one is playing;
+- it bumps a `speechGeneration` counter. Each alert remembers the value it started with and **won't start playing if the value has changed**, so a clip that finishes downloading after you've decided is dropped.
+
+It runs at the start of every new alert, when the device sends `BTN:APPROVE` or `BTN:DENY`, and when a request times out.
+So no matter how an alert ends, you never hear a voice for a decision you've already made.
 If this step fails, it only logs an error; approvals still work.
 
 ---
@@ -452,7 +455,8 @@ curl -X POST localhost:4545/debug/log -H 'Content-Type: application/json' \
 | TTS voice / model | `bridge/server.js` → `speakAlert()` | `EXAVITQu4vr4xnSDxMaL` / `eleven_turbo_v2_5` |
 | Active-session window | `bridge/stats.js` → `ACTIVE_WINDOW_MS` | 60 s |
 | Ring "100 %" scale | `bridge/stats.js` → `SONNET_CONTEXT_WINDOW` | 200,000 tokens *(Sonnet 5's real window is 1M; see below)* |
-| Pricing ($ / 1M tokens) | `bridge/stats.js` → `PRICE_*` | input 2.00 · output 10.00 · cache write 2.50 · cache read 0.20 |
+| Pricing ($ / 1M tokens) | `bridge/stats.js` → `PRICING_PER_MTOK` | per model (see table below); unknown models fall back to `DEFAULT_MODEL` (`claude-sonnet-5`) |
+| Cache-write multipliers | `bridge/stats.js` → `CACHE_WRITE_*_MULTIPLIER` | 5-minute TTL 1.25 × input · 1-hour TTL 2 × input |
 | Long-press (deny) time | `firmware/main/main.c` → `lv_indev_set_long_press_time` | 1000 ms |
 | Red-ring threshold | `firmware/main/main.c` → `handle_line` | ≥ 80 % |
 | Display / touch pins | `main.c` / `touch_driver.h` | see [Pinout](#pinout-as-used-in-firmware) |
@@ -461,20 +465,37 @@ curl -X POST localhost:4545/debug/log -H 'Content-Type: application/json' \
 
 ## 💲 Cost & usage accuracy
 
-While documenting `stats.js`, I compared its numbers against the current Claude API pricing and against real Claude Code transcripts.
-The **per-token rates are correct for Claude Sonnet 5**, but a few assumptions make the dashboard numbers approximate.
-The code comments now describe these; the behaviour is unchanged.
+The `$X.XX today` figure is an **estimate** of first-party Claude API list prices for everything Claude Code did today, computed from your local transcripts. It is not your bill: subscription plans aren't billed per token, and the estimate leaves out discounts, fast mode and cloud-provider pricing.
 
-| # | What the code does | Reality | Effect on the device |
-|---|---|---|---|
-| 1 | Counts every `assistant` line in a transcript. | Claude Code writes **one line per content block** (text, tool call, …), and each line repeats the same `message.usage`. In one real session, 44 lines covered 20 API messages. | 💲 **Cost is overstated**, roughly 2× in typical tool-heavy sessions. It should de-duplicate by `message.id`. |
-| 2 | Prices everything at **Sonnet 5** rates: $2 in / $10 out / $2.50 cache write / $0.20 cache read per MTok. | Sessions can run on any model (e.g. this repo's own sessions use `claude-opus-5-5` at $4 / $20). The model is recorded in `message.model`. | 💲 Cost is wrong whenever the session isn't on Sonnet 5. |
-| 3 | Prices all cache writes at the **5-minute TTL** rate (1.25× input). | Claude Code's cache writes are mostly **1-hour TTL** (2× input = $4.00/MTok on Sonnet 5). The split is in `usage.cache_creation.ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens`. | 💲 Cache-write cost is understated by about 37 %. |
-| 4 | Treats 200,000 tokens as a full context window. | Sonnet 5, Opus 5.5 and Fable 5.1 have a **1,000,000-token** window (Haiku 4.5 has 200K). | 🟠 The ring reads 5× fuller than the real window. It is still useful as a "this session is getting big" gauge. |
-| 5 | Labels the total `$X.XX today`. | It's the sum over sessions active in the last 60 s, accumulated since the bridge started. | 🏷️ The label is misleading; it isn't a daily total. |
+### How the cost is computed
 
-Fixing 1–3 means de-duplicating by `message.id`, choosing the rate table from `message.model`, and splitting cache writes by TTL.
-Fixing 4 is a one-line constant change, if you'd rather the ring show the true window.
+| Step | Why |
+|---|---|
+| **One charge per `message.id`.** A later line for the same ID replaces the earlier amount. | Claude Code writes one transcript line per content block (text, tool call, …), and each line repeats the same `usage`. In testing, 193 lines covered only 109 real API responses. |
+| **Rates from each message's `message.model`**, matched by longest prefix. | Sessions run on different models (Opus 5.5 costs twice as much as Sonnet 5), and dated IDs like `claude-haiku-4-5-20251001` still match. |
+| **Cache writes split by TTL** using `usage.cache_creation`: 5-minute writes cost 1.25 × input and 1-hour writes cost 2 × input. | Claude Code mostly uses 1-hour cache writes. |
+| **"Today" uses each entry's `timestamp`** in local time, and the total resets at midnight. | This matches the device label. Old transcripts read at startup no longer inflate the cost or the agent count. |
+
+The fix was checked against an independent `jq` calculation over real transcripts, and the two matched to the cent.
+
+### Price table (USD per 1M tokens)
+
+| Model prefix | Input | Output | Cache read | 5m write | 1h write |
+|---|---|---|---|---|---|
+| `claude-fable-5-1`, `claude-mythos-5-1` | 10.00 | 50.00 | 0.25 | 12.50 | 20.00 |
+| `claude-fable-5`, `claude-mythos-5` | 10.00 | 50.00 | 1.00 | 12.50 | 20.00 |
+| `claude-opus-5-5` | 4.00 | 20.00 | 0.20 | 5.00 | 8.00 |
+| `claude-opus-5`, `claude-opus-4-8/4-7/4-6` | 5.00 | 25.00 | 0.50 | 6.25 | 10.00 |
+| `claude-sonnet-5` *(default)* | 2.00 | 10.00 | 0.20 | 2.50 | 4.00 |
+| `claude-sonnet-4-6` | 3.00 | 15.00 | 0.30 | 3.75 | 6.00 |
+| `claude-haiku-4-5` | 1.00 | 5.00 | 0.10 | 1.25 | 2.00 |
+
+When Anthropic changes prices or releases a model, update `PRICING_PER_MTOK` in `bridge/stats.js`. An unknown model logs one warning and is priced as Sonnet 5.
+
+### Still approximate
+
+- **Context ring scale:** 200,000 tokens counts as "100 %", but Sonnet 5, Opus 5.5 and Fable 5.1 have a **1,000,000-token** window (Haiku 4.5 has 200K). The ring reads 5× fuller than the real window. It still works as a "this session is getting big" gauge.
+- **Not modelled:** fast mode (`usage.speed: "fast"`, premium pricing), Batch discounts, Bedrock/Vertex pricing, and server-tool fees such as web search.
 
 ---
 
@@ -498,8 +519,7 @@ Current limitations of the project:
 
 - **One approval at a time:** if two agents ask at once, the second one gets `ask` right away and falls back to the normal prompt.
 - **Only `Bash` is gated:** the hook matcher is `Bash`. Other tools (Edit, Write, and so on) aren't sent to the device.
-- **Cost and context % are approximations:** see [Cost & usage accuracy](#-cost--usage-accuracy).
-- **Voice can play after you decide:** `stopSpeaking()` only stops audio that is already playing. If you tap or hold while the ElevenLabs request is still downloading, that clip starts playing afterwards.
+- **Cost is an estimate and the ring uses a 200K scale:** see [Cost & usage accuracy](#-cost--usage-accuracy).
 - **macOS-only audio:** voice playback uses `afplay`. On Linux or Windows, swap in another player.
 - **Hard-coded serial port:** there's no auto-detection yet.
 - **Leftovers:** `firmware/README.md` and `firmware/pytest_hello_world.py` come from the ESP-IDF *hello_world* template.
@@ -535,7 +555,8 @@ Please keep new code in the same style.
 | `f0bdd88` | Hook falls back to `ask`; removed shadowed duplicate button handlers |
 | `77ef678` | Added this README |
 | `e53eb8d` | **`stopSpeaking()`**: voice alerts no longer talk over each other; ElevenLabs `eleven_turbo_v2_5` |
-| — | JSDoc / Doxygen comments across the codebase; cost-accuracy notes |
+| `9ff3aac` | JSDoc / Doxygen comments across the codebase; cost-accuracy notes |
+| — | **Accurate cost**: once per `message.id`, per-model rates, 1-hour cache writes, real daily total. Voice alerts can no longer play after a decision |
 
 ---
 
@@ -543,7 +564,7 @@ Please keep new code in the same style.
 
 - Serial port auto-discovery and auto-reconnect
 - Gate more tools (Edit/Write) and show a short LLM summary with the `SUMMARY:` message
-- Accurate cost: de-duplicate by `message.id`, per-model rates, 1-hour cache-write pricing, real daily totals
+- Per-model context windows for the ring, and fast-mode pricing
 - A queue for simultaneous approval requests
 - Swipe gestures (already decoded by the CST816D) for scrolling long commands
 - A 3D-printed enclosure
